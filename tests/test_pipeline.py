@@ -4,6 +4,7 @@ import pytest
 from orfedit.core import (
     EditParams,
     Pipeline,
+    RawImage,
     compute_histogram,
     process,
     synthetic_raw,
@@ -60,6 +61,45 @@ def test_histogram_counts_all_pixels(image):
 def test_pipeline_is_deterministic(image):
     p = EditParams(exposure=0.3, contrast=15, vibrance=25, sharpen=20)
     assert np.array_equal(process(image, p), process(image, p))
+
+
+def _percentiles(rgb_uint8):
+    lum = rgb_uint8.astype(np.float32) @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    return np.percentile(lum, [1, 50, 99])
+
+
+def test_auto_tone_improves_hazy_image():
+    """Auto tone should expand a washed-out image's tonal range end-to-end."""
+    rng = np.random.default_rng(5)
+    disp = 0.4 + 0.5 * rng.random((80, 80, 3)).astype(np.float32)  # milky, low contrast
+    hazy = RawImage(adj.srgb_decode(disp))
+
+    before = process(hazy, EditParams())
+    after = process(hazy, EditParams.from_dict(adj.auto_tone(hazy.linear_rgb)))
+
+    lo_b, _, hi_b = _percentiles(before)
+    lo_a, _, hi_a = _percentiles(after)
+    # Deeper blacks and a wider overall spread => more contrast, less haze.
+    assert lo_a < lo_b
+    assert (hi_a - lo_a) > (hi_b - lo_b)
+
+
+def test_auto_tone_brightens_dark_image():
+    dark = RawImage(adj.srgb_decode(np.full((64, 64, 3), 0.05, np.float32)))
+    before = process(dark, EditParams())
+    after = process(dark, EditParams.from_dict(adj.auto_tone(dark.linear_rgb)))
+    assert after.mean() > before.mean()
+
+
+def test_auto_wb_neutralises_grey_scene():
+    """Applying the suggested WB to a colour-cast neutral scene evens the channels."""
+    cast = RawImage(np.full((48, 48, 3), 0.3, np.float32) * np.array([1.3, 1.0, 0.7], np.float32))
+    temp, tint = adj.auto_white_balance(cast.linear_rgb)
+    corrected = process(cast, EditParams(temperature=temp, tint=tint))
+    channel_means = corrected.reshape(-1, 3).mean(axis=0)
+    spread_before = 0.3 * (1.3 - 0.7)  # original R-B gap in linear
+    spread_after = (channel_means.max() - channel_means.min()) / 255.0
+    assert spread_after < spread_before
 
 
 def test_preview_and_full_render_are_consistent(image):

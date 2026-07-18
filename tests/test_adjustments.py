@@ -136,3 +136,46 @@ def test_auto_white_balance_neutralises_cast():
     casted[..., 0] = 0.8
     temp, tint = adj.auto_white_balance(casted)
     assert temp < 0
+
+
+def test_auto_wb_corrects_blue_cast():
+    img = np.full((40, 40, 3), 0.4, np.float32)
+    img[..., 2] = 0.6  # blue-heavy -> auto WB should warm it (temp > 0)
+    temp, _ = adj.auto_white_balance(img)
+    assert temp > 0
+
+
+def test_auto_wb_ignores_saturated_colours():
+    # Mostly neutral grey (neutral illuminant) with a saturated green stripe.
+    img = np.full((40, 40, 3), 0.3, np.float32)
+    img[:, :10] = np.array([0.05, 0.6, 0.05], np.float32)
+    temp, tint = adj.auto_white_balance(img)
+    # The neutral pixels dominate the estimate, so the correction stays small
+    # (a naive full-image grey-world would swing hard toward magenta here).
+    assert abs(temp) < 15 and abs(tint) < 20
+
+
+def test_auto_tone_returns_full_param_set():
+    img = adj.srgb_decode(np.full((32, 32, 3), 0.5, np.float32))  # linear mid-grey
+    tone = adj.auto_tone(img)
+    assert set(tone) == {
+        "exposure", "contrast", "highlights", "shadows", "whites", "blacks"
+    }
+
+
+def test_auto_tone_deepens_milky_blacks():
+    """A washed-out, low-contrast frame should get its black point deepened."""
+    rng = np.random.default_rng(0)
+    disp = 0.35 + 0.55 * rng.random((64, 64, 3)).astype(np.float32)  # lifted blacks
+    tone = adj.auto_tone(adj.srgb_decode(disp))
+    assert tone["blacks"] < 0
+
+
+def test_auto_tone_brightens_dark_scene():
+    tone = adj.auto_tone(adj.srgb_decode(np.full((48, 48, 3), 0.03, np.float32)))
+    assert tone["exposure"] > 0
+
+
+def test_auto_tone_darkens_bright_scene():
+    tone = adj.auto_tone(adj.srgb_decode(np.full((48, 48, 3), 0.85, np.float32)))
+    assert tone["exposure"] < 0

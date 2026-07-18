@@ -214,25 +214,100 @@ def orient(rgb: np.ndarray, rotation: int, flip_h: bool, flip_v: bool) -> np.nda
 # --------------------------------------------------------------------------
 # Auto adjustments (suggest slider values from image statistics)
 # --------------------------------------------------------------------------
-def auto_exposure_ev(linear: np.ndarray, target: float = 0.18) -> float:
-    """Suggested exposure (stops) to bring median luma to ``target``."""
+def auto_exposure_ev(
+    linear: np.ndarray, target: float = 0.11, damping: float = 0.8
+) -> float:
+    """Suggested exposure (stops) to place the median tone near ``target``.
+
+    ``target`` is a linear-light value (0.11 ≈ a natural mid-tone once the sRGB
+    curve is applied).  The correction is damped and clamped so a single bright
+    or dark region can't drive the whole frame to a clipped extreme -- the old
+    behaviour, which mapped the median straight onto mid-grey, tended to
+    over-brighten well-lit scenes and under-brighten low-key ones.
+    """
     lum = luminance(linear)
     median = float(np.median(lum))
     if median <= _EPS:
         return 0.0
-    ev = float(np.log2(target / median))
-    return float(np.clip(ev, -3.0, 3.0))
+    ev = float(np.log2(target / median)) * damping
+    return float(np.clip(ev, -2.5, 2.5))
 
 
-def auto_white_balance(linear: np.ndarray):
-    """Grey-world temperature/tint suggestion as ``(temperature, tint)``."""
-    means = linear.reshape(-1, 3).mean(axis=0)
-    means = np.maximum(means, _EPS)
-    g = means[1]
-    # Gains that would neutralise the average colour (relative to green).
-    r_gain = float(g / means[0])
-    b_gain = float(g / means[2])
-    # Invert the white_balance() model (with g_gain fixed near 1 -> tint ~ 0).
-    temperature = np.clip((r_gain - b_gain) / 0.5 * 50.0, -100.0, 100.0)
-    tint = 0.0
+def auto_tone(linear: np.ndarray) -> dict:
+    """Suggest a full set of tone adjustments (a Lightroom-style "Auto").
+
+    Returns a dict of :class:`EditParams` field names to values covering
+    exposure, contrast, highlights, shadows, whites and blacks.  Exposure is
+    estimated first, then the resulting display-space tones are measured to
+    decide how much to recover highlights, open shadows and set the black/white
+    points -- so the whole tonal range is used instead of leaving the image flat
+    and hazy.
+    """
+    ev = auto_exposure_ev(linear)
+
+    # Evaluate the tones we'd actually see after this exposure, in display space.
+    display = srgb_encode(np.clip(linear * (2.0 ** ev), 0.0, None))
+    lum_d = luminance(np.clip(display, 0.0, 1.0))
+    lo, hi = np.percentile(lum_d, [1.0, 99.0])
+    frac_dark = float(np.mean(lum_d < 0.06))
+    frac_bright = float(np.mean(lum_d > 0.94))
+
+    # Scale the black/white-point moves by how much tonal range actually
+    # exists: a nearly flat frame must not be stretched into pure black/white.
+    range_factor = float(np.clip((hi - lo) / 0.25, 0.0, 1.0))
+
+    # Blacks: deepen milky/lifted shadows toward a near-black point (~0.03).
+    blacks = -float(np.clip((lo - 0.03) / 0.06, 0.0, 1.0)) * 45.0 * range_factor
+    # Whites: add headroom when the brightest tones fall well short of white.
+    whites = float(np.clip((0.92 - hi) / 0.15, 0.0, 1.0)) * 35.0 * range_factor
+    # Highlights: recover when a meaningful area is near clipping.
+    highlights = -float(np.clip(frac_bright / 0.10, 0.0, 1.0)) * 55.0
+    # Shadows: open up when a meaningful area is crushed.
+    shadows = float(np.clip(frac_dark / 0.12, 0.0, 1.0)) * 45.0
+
+    return {
+        "exposure": round(float(ev), 2),
+        "contrast": 12,
+        "highlights": round(highlights),
+        "shadows": round(shadows),
+        "whites": round(whites),
+        "blacks": round(blacks),
+    }
+
+
+def auto_white_balance(linear: np.ndarray, damping: float = 0.85):
+    """Estimate temperature/tint from near-neutral pixels (grey-world, robust).
+
+    A plain full-image grey-world average is thrown off by scenes dominated by a
+    saturated colour (foliage, sky, a red wall): it tries to neutralise the
+    subject and pushes the opposite way.  Instead we estimate the illuminant
+    from low-saturation, well-exposed pixels only, then recover both temperature
+    and tint.  Returns ``(temperature, tint)`` in ``[-100, 100]``.
+    """
+    rgb = linear.reshape(-1, 3)
+    lum = luminance(linear).reshape(-1)
+    mx = rgb.max(axis=1)
+    mn = rgb.min(axis=1)
+    sat = (mx - mn) / (mx + _EPS)
+
+    # Consider pixels that are neither near-black nor near-clipping.
+    valid = (lum > 0.02) & (mx < 0.98)
+    neutral = valid & (sat < 0.15)
+    min_count = max(50, int(0.02 * rgb.shape[0]))
+    if int(neutral.sum()) >= min_count:
+        sample = rgb[neutral]
+    else:
+        # Fallback: the least-saturated 30% of the valid pixels.
+        idx = np.where(valid)[0]
+        if idx.size == 0:
+            return 0.0, 0.0
+        order = idx[np.argsort(sat[idx])]
+        sample = rgb[order[: max(1, int(0.3 * idx.size))]]
+
+    means = np.maximum(sample.mean(axis=0), _EPS)
+    gains = means.mean() / means          # grey-world gains over neutral pixels
+    gn = gains / gains.mean()             # normalise so the average gain is 1
+
+    temperature = np.clip(100.0 * (gn[0] - gn[2]) * damping, -100.0, 100.0)
+    tint = np.clip(100.0 * (1.0 - gn[1]) / 0.3 * damping, -100.0, 100.0)
     return float(temperature), float(tint)

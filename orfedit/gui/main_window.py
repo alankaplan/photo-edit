@@ -283,16 +283,21 @@ class MainWindow(QMainWindow):
     def _on_auto_tone(self) -> None:
         if self._preview_image is None:
             return
-        ev = adj.auto_exposure_ev(self._preview_image.linear_rgb)
-        self._controls.update_field("exposure", round(ev, 2))
-        self.statusBar().showMessage(f"Auto tone: exposure {ev:+.2f} EV", 3000)
+        tone = adj.auto_tone(self._preview_image.linear_rgb)
+        self._controls.update_fields(tone)
+        self.statusBar().showMessage(
+            f"Auto tone: exposure {tone['exposure']:+.2f} EV, "
+            f"highlights {tone['highlights']:+.0f}, shadows {tone['shadows']:+.0f}",
+            4000,
+        )
 
     def _on_auto_wb(self) -> None:
         if self._preview_image is None:
             return
         temperature, tint = adj.auto_white_balance(self._preview_image.linear_rgb)
-        self._controls.update_field("tint", round(tint))
-        self._controls.update_field("temperature", round(temperature))
+        self._controls.update_fields(
+            {"temperature": round(temperature), "tint": round(tint)}
+        )
         self.statusBar().showMessage(
             f"Auto white balance: temp {temperature:+.0f}, tint {tint:+.0f}", 3000
         )

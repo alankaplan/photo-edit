@@ -163,5 +163,13 @@ class ControlPanel(QWidget):
             self._sliders[name].set_value(value)
         self.params_changed.emit()
 
+    def update_fields(self, values: Dict[str, float]) -> None:
+        """Set several fields at once, emitting a single change signal."""
+        for name, value in values.items():
+            setattr(self._params, name, value)
+            if name in self._sliders:
+                self._sliders[name].set_value(value)
+        self.params_changed.emit()
+
     def reset_all(self) -> None:
         self.set_params(EditParams())
