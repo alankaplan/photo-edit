@@ -73,6 +73,33 @@ def test_edits_trigger_rerender(app):
     win.close()
 
 
+def test_region_selection_drives_spot_metering(app):
+    from orfedit.gui.main_window import MainWindow
+
+    win = MainWindow()
+    win._on_open_demo()
+    _wait_until(lambda: win._last_shown_id >= 0)
+
+    # Simulate the viewer emitting a region (as a rubber-band release would):
+    # the bright upper-left sky band of the demo image.
+    win._viewer.region_selected.emit(0.0, 0.0, 0.5, 0.25)
+    assert win._meter_region == (0.0, 0.0, 0.5, 0.25)
+
+    win._on_auto_tone()
+    ev_region = win._controls.params().exposure
+
+    # Clearing the region and re-running should meter the whole frame instead.
+    win._on_toggle_region_select(False)
+    assert win._meter_region is None
+    win._controls.reset_all()
+    win._on_auto_tone()
+    ev_full = win._controls.params().exposure
+
+    # Metering a bright region should darken relative to whole-frame metering.
+    assert ev_region < ev_full
+    win.close()
+
+
 def test_auto_tone_sets_exposure(app):
     from orfedit.gui.main_window import MainWindow
 

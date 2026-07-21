@@ -214,17 +214,53 @@ def orient(rgb: np.ndarray, rotation: int, flip_h: bool, flip_v: bool) -> np.nda
 # --------------------------------------------------------------------------
 # Auto adjustments (suggest slider values from image statistics)
 # --------------------------------------------------------------------------
-def _metered_key(linear: np.ndarray) -> float:
-    """Subject-weighted, highlight-protected key luminance for metering.
+Region = "tuple[float, float, float, float]"  # normalized (x0, y0, x1, y1) in [0, 1]
 
-    A plain median/mean is dominated by whatever fills the frame: a bright
-    backlit background drags exposure down and darkens the (usually central)
-    subject, while a dark surround over-brightens it.  Instead we weight toward
-    the centre of the frame and away from near-clipped highlights (typically sky
-    or windows), then take a geometric mean, which tracks perceived exposure
-    better than an arithmetic one.
+
+def _resolve_region(shape, region):
+    """Convert a normalized ``(x0, y0, x1, y1)`` region to pixel slices.
+
+    Returns ``(row_slice, col_slice)`` or ``None`` when ``region`` is ``None``.
+    Coordinates are fractions of width/height so a region selected on the preview
+    maps identically onto the full-resolution image.
+    """
+    if region is None:
+        return None
+    h, w = shape[:2]
+    x0, x1 = sorted((float(region[0]), float(region[2])))
+    y0, y1 = sorted((float(region[1]), float(region[3])))
+    px0 = int(np.clip(round(x0 * w), 0, w - 1))
+    px1 = int(np.clip(round(x1 * w), px0 + 1, w))
+    py0 = int(np.clip(round(y0 * h), 0, h - 1))
+    py1 = int(np.clip(round(y1 * h), py0 + 1, h))
+    return (slice(py0, py1), slice(px0, px1))
+
+
+def _weighted_geomean(lum: np.ndarray, weight: np.ndarray) -> float:
+    wsum = float(weight.sum()) + _EPS
+    log_lum = np.log(np.clip(lum, 1e-4, None))
+    return float(np.exp(float(np.sum(weight * log_lum)) / wsum))
+
+
+def _metered_key(linear: np.ndarray, region: "Region | None" = None) -> float:
+    """Highlight-protected key luminance for metering (geometric mean).
+
+    Without a ``region`` the estimate is *centre-weighted*: it weights toward the
+    middle of the frame and away from near-clipped highlights (typically sky or
+    windows), which handles the common "subject in the middle" case but only
+    guesses where the subject is.
+
+    With a ``region`` (normalized bbox) the user has told us exactly what to
+    expose for, so we meter only inside it -- true spot metering -- keeping just
+    the highlight-protection weighting.
     """
     lum = luminance(linear)
+    if region is not None:
+        sl = _resolve_region(lum.shape, region)
+        sub = lum[sl]
+        w_tone = np.clip(1.0 - _smoothstep(0.7, 1.0, sub), 0.05, 1.0)
+        return _weighted_geomean(sub, w_tone)
+
     h, w = lum.shape
     yy, xx = np.mgrid[0:h, 0:w]
     dy = (yy - (h - 1) / 2.0) / max(h / 2.0, 1.0)
@@ -232,31 +268,31 @@ def _metered_key(linear: np.ndarray) -> float:
     w_center = np.exp(-(dx * dx + dy * dy) / (2.0 * 0.5 ** 2))
     # De-weight pixels near clipping -- most often bright background, not subject.
     w_tone = np.clip(1.0 - _smoothstep(0.7, 1.0, lum), 0.05, 1.0)
-    weight = w_center * w_tone
-    wsum = float(weight.sum()) + _EPS
-    log_lum = np.log(np.clip(lum, 1e-4, None))
-    return float(np.exp(float(np.sum(weight * log_lum)) / wsum))
+    return _weighted_geomean(lum, w_center * w_tone)
 
 
 def auto_exposure_ev(
-    linear: np.ndarray, target: float = 0.13, damping: float = 0.85
+    linear: np.ndarray,
+    target: float = 0.13,
+    damping: float = 0.85,
+    region: "Region | None" = None,
 ) -> float:
-    """Suggested exposure (stops) from subject-weighted metering.
+    """Suggested exposure (stops) from (optionally spot-) metering.
 
     ``target`` is a linear-light key value (~0.13 ≈ a natural mid-tone once the
-    sRGB curve is applied).  Metering is centre-weighted and ignores near-clipped
-    highlights (see :func:`_metered_key`), so a bright backlit background no
-    longer forces the subject dark -- nor a dark surround over-bright.  The
-    result is damped and clamped for stability.
+    sRGB curve is applied).  When ``region`` is given, exposure is metered from
+    that region only (spot metering); otherwise metering is centre-weighted and
+    ignores near-clipped highlights (see :func:`_metered_key`).  The result is
+    damped and clamped for stability.
     """
-    key = _metered_key(linear)
+    key = _metered_key(linear, region=region)
     if key <= _EPS:
         return 0.0
     ev = float(np.log2(target / key)) * damping
     return float(np.clip(ev, -2.5, 2.5))
 
 
-def auto_tone(linear: np.ndarray) -> dict:
+def auto_tone(linear: np.ndarray, region: "Region | None" = None) -> dict:
     """Suggest a full set of tone adjustments (a Lightroom-style "Auto").
 
     Returns a dict of :class:`EditParams` field names to values covering
@@ -267,7 +303,7 @@ def auto_tone(linear: np.ndarray) -> dict:
     contrast, but only a light shadow/white lift -- to avoid a washed-out, hazy
     look on lifted frames.
     """
-    ev = auto_exposure_ev(linear)
+    ev = auto_exposure_ev(linear, region=region)
 
     # Evaluate the tones we'd actually see after this exposure, in display space.
     display = srgb_encode(np.clip(linear * (2.0 ** ev), 0.0, None))
@@ -299,34 +335,46 @@ def auto_tone(linear: np.ndarray) -> dict:
     }
 
 
-def auto_white_balance(linear: np.ndarray, damping: float = 0.85):
-    """Estimate temperature/tint from near-neutral pixels (grey-world, robust).
+def auto_white_balance(
+    linear: np.ndarray, damping: float = 0.85, region: "Region | None" = None
+):
+    """Estimate temperature/tint to neutralise a colour cast.
 
-    A plain full-image grey-world average is thrown off by scenes dominated by a
-    saturated colour (foliage, sky, a red wall): it tries to neutralise the
-    subject and pushes the opposite way.  Instead we estimate the illuminant
-    from low-saturation, well-exposed pixels only, then recover both temperature
-    and tint.  Returns ``(temperature, tint)`` in ``[-100, 100]``.
+    Without a ``region``, a plain full-image grey-world average is thrown off by
+    scenes dominated by a saturated colour (foliage, sky, a red wall), so we
+    estimate the illuminant from low-saturation, well-exposed pixels only.
+
+    With a ``region``, the user has pointed at something that should be neutral
+    (a grey card, a white shirt, a wall) -- the classic eyedropper -- so we use
+    every pixel in that region as the reference and neutralise it directly.
+
+    Returns ``(temperature, tint)`` in ``[-100, 100]``.
     """
-    rgb = linear.reshape(-1, 3)
-    lum = luminance(linear).reshape(-1)
-    mx = rgb.max(axis=1)
-    mn = rgb.min(axis=1)
-    sat = (mx - mn) / (mx + _EPS)
-
-    # Consider pixels that are neither near-black nor near-clipping.
-    valid = (lum > 0.02) & (mx < 0.98)
-    neutral = valid & (sat < 0.15)
-    min_count = max(50, int(0.02 * rgb.shape[0]))
-    if int(neutral.sum()) >= min_count:
-        sample = rgb[neutral]
-    else:
-        # Fallback: the least-saturated 30% of the valid pixels.
-        idx = np.where(valid)[0]
-        if idx.size == 0:
+    if region is not None:
+        sl = _resolve_region(linear.shape, region)
+        sample = linear[sl].reshape(-1, 3)
+        if sample.size == 0:
             return 0.0, 0.0
-        order = idx[np.argsort(sat[idx])]
-        sample = rgb[order[: max(1, int(0.3 * idx.size))]]
+    else:
+        rgb = linear.reshape(-1, 3)
+        lum = luminance(linear).reshape(-1)
+        mx = rgb.max(axis=1)
+        mn = rgb.min(axis=1)
+        sat = (mx - mn) / (mx + _EPS)
+
+        # Consider pixels that are neither near-black nor near-clipping.
+        valid = (lum > 0.02) & (mx < 0.98)
+        neutral = valid & (sat < 0.15)
+        min_count = max(50, int(0.02 * rgb.shape[0]))
+        if int(neutral.sum()) >= min_count:
+            sample = rgb[neutral]
+        else:
+            # Fallback: the least-saturated 30% of the valid pixels.
+            idx = np.where(valid)[0]
+            if idx.size == 0:
+                return 0.0, 0.0
+            order = idx[np.argsort(sat[idx])]
+            sample = rgb[order[: max(1, int(0.3 * idx.size))]]
 
     means = np.maximum(sample.mean(axis=0), _EPS)
     gains = means.mean() / means          # grey-world gains over neutral pixels

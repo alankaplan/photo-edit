@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         self._last_shown_id = -1
         self._loader: Optional[LoaderThread] = None
         self._demosaic = "AHD"
+        self._meter_region = None  # normalized (x0, y0, x1, y1) or None
 
         self._build_central()
         self._build_dock()
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
 
         self._controls.params_changed.connect(self._debounce.start)
         self._viewer.zoom_changed.connect(self._on_zoom_changed)
+        self._viewer.region_selected.connect(self._on_region_selected)
 
         self._set_image_loaded(False)
         self.statusBar().showMessage("Open an ORF file to begin  (File → Open)")
@@ -148,6 +150,14 @@ class MainWindow(QMainWindow):
         self._act_auto_wb = QAction("Auto &White Balance", self)
         self._act_auto_wb.triggered.connect(self._on_auto_wb)
         edit_menu.addAction(self._act_auto_wb)
+        self._act_region = QAction("Select &Meter Region", self)
+        self._act_region.setCheckable(True)
+        self._act_region.setToolTip(
+            "Drag a box over the subject: Auto Tone meters exposure from it, "
+            "and Auto White Balance treats it as neutral (eyedropper)."
+        )
+        self._act_region.toggled.connect(self._on_toggle_region_select)
+        edit_menu.addAction(self._act_region)
         edit_menu.addSeparator()
         self._act_rotate = QAction("Rotate 90° CW", self)
         self._act_rotate.triggered.connect(self._on_rotate)
@@ -192,6 +202,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self._act_auto_tone)
         toolbar.addAction(self._act_auto_wb)
+        toolbar.addAction(self._act_region)
         toolbar.addAction(self._act_reset)
         toolbar.addSeparator()
         toolbar.addAction(self._act_fit)
@@ -252,6 +263,9 @@ class MainWindow(QMainWindow):
         """Adopt ``image`` as the current photo and render it."""
         self._full_image = image
         self._preview_image = image.downscaled(PREVIEW_MAX_EDGE)
+        self._meter_region = None
+        if self._act_region.isChecked():
+            self._act_region.setChecked(False)
         self._controls.blockSignals(True)
         self._controls.reset_all()
         self._controls.blockSignals(False)
@@ -280,13 +294,47 @@ class MainWindow(QMainWindow):
     def _on_reset_all(self) -> None:
         self._controls.reset_all()
 
+    def _metering_source(self):
+        """Linear image to meter from, oriented to match what the user sees.
+
+        Only matters when a region is selected and the photo has been rotated or
+        flipped, since the region is in displayed coordinates but ``linear_rgb``
+        is stored unoriented.
+        """
+        linear = self._preview_image.linear_rgb
+        if self._meter_region is None:
+            return linear
+        p = self._controls.params()
+        if p.rotation or p.flip_horizontal or p.flip_vertical:
+            return adj.orient(linear, p.rotation, p.flip_horizontal, p.flip_vertical)
+        return linear
+
+    def _on_toggle_region_select(self, enabled: bool) -> None:
+        self._viewer.set_select_mode(enabled)
+        if enabled:
+            self.statusBar().showMessage(
+                "Region select: drag a box over the subject, then use Auto Tone "
+                "or Auto White Balance", 6000
+            )
+        else:
+            self._meter_region = None
+            self._viewer.clear_region()
+            self.statusBar().showMessage("Region cleared — metering the whole frame", 3000)
+
+    def _on_region_selected(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        self._meter_region = (x0, y0, x1, y1)
+        self.statusBar().showMessage(
+            "Meter region set — Auto Tone / Auto White Balance will use it", 5000
+        )
+
     def _on_auto_tone(self) -> None:
         if self._preview_image is None:
             return
-        tone = adj.auto_tone(self._preview_image.linear_rgb)
+        tone = adj.auto_tone(self._metering_source(), region=self._meter_region)
         self._controls.update_fields(tone)
+        scope = "region" if self._meter_region else "whole frame"
         self.statusBar().showMessage(
-            f"Auto tone: exposure {tone['exposure']:+.2f} EV, "
+            f"Auto tone ({scope}): exposure {tone['exposure']:+.2f} EV, "
             f"highlights {tone['highlights']:+.0f}, shadows {tone['shadows']:+.0f}",
             4000,
         )
@@ -294,12 +342,15 @@ class MainWindow(QMainWindow):
     def _on_auto_wb(self) -> None:
         if self._preview_image is None:
             return
-        temperature, tint = adj.auto_white_balance(self._preview_image.linear_rgb)
+        temperature, tint = adj.auto_white_balance(
+            self._metering_source(), region=self._meter_region
+        )
         self._controls.update_fields(
             {"temperature": round(temperature), "tint": round(tint)}
         )
+        scope = "region" if self._meter_region else "auto"
         self.statusBar().showMessage(
-            f"Auto white balance: temp {temperature:+.0f}, tint {tint:+.0f}", 3000
+            f"White balance ({scope}): temp {temperature:+.0f}, tint {tint:+.0f}", 3000
         )
 
     def _on_rotate(self) -> None:
@@ -365,6 +416,7 @@ class MainWindow(QMainWindow):
             self._act_reset,
             self._act_auto_tone,
             self._act_auto_wb,
+            self._act_region,
             self._act_rotate,
             self._act_flip_h,
             self._act_flip_v,

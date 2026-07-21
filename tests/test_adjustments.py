@@ -187,6 +187,39 @@ def test_auto_exposure_spares_bright_subject_on_dark_surround():
     assert adj.auto_exposure_ev(lin) < 0.6
 
 
+def test_spot_metering_exposes_for_selected_region():
+    """Metering a dark corner brightens more than metering a bright corner."""
+    lin = np.full((60, 60, 3), 0.5, np.float32)
+    lin[:20, :20] = 0.04  # dark patch, top-left
+    ev_dark = adj.auto_exposure_ev(lin, region=(0.0, 0.0, 0.33, 0.33))
+    ev_bright = adj.auto_exposure_ev(lin, region=(0.66, 0.66, 1.0, 1.0))
+    assert ev_dark > ev_bright
+    assert ev_dark > 0        # expose the dark patch up
+    assert ev_bright < 0.2    # the bright patch needs little/none
+
+
+def test_spot_wb_neutralises_selected_patch():
+    """WB from a region drives that patch's channels toward equal (neutral)."""
+    lin = np.full((40, 40, 3), 0.4, np.float32)
+    lin[:, :, 0] *= 1.4  # warm/red patch everywhere; select part of it
+    temp, tint = adj.auto_white_balance(lin, region=(0.1, 0.1, 0.5, 0.5))
+    assert temp < 0       # cool it to cancel the red
+    # Applying the correction should even the region's channels.
+    corrected = adj.white_balance(lin, temp, tint)
+    patch = corrected[4:20, 4:20].reshape(-1, 3).mean(axis=0)
+    assert (patch.max() - patch.min()) < (0.4 * 1.4 - 0.4)
+
+
+def test_region_resolves_and_clamps():
+    sl = adj._resolve_region((100, 200), (0.25, 0.5, 0.75, 1.0))
+    rows, cols = sl
+    assert (rows.start, rows.stop) == (50, 100)
+    assert (cols.start, cols.stop) == (50, 150)
+    # Degenerate/zero-size region still yields at least one pixel.
+    sl2 = adj._resolve_region((10, 10), (0.5, 0.5, 0.5, 0.5))
+    assert sl2[0].stop > sl2[0].start and sl2[1].stop > sl2[1].start
+
+
 def test_auto_tone_deepens_milky_blacks():
     """A washed-out, low-contrast frame should get its black point deepened."""
     rng = np.random.default_rng(0)

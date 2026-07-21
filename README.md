@@ -28,7 +28,11 @@ stays live and reversible.
   - Colour: *Saturation*, *Vibrance*
   - Detail: *Sharpening* (unsharp mask)
   - Geometry: rotate 90°, flip horizontal / vertical
-- **Auto Tone** and **Auto White Balance** one‑click helpers.
+- **Auto Tone** and **Auto White Balance** one‑click helpers, with
+  subject-weighted (center + highlight-protected) metering by default.
+- **Select Meter Region** — drag a box over the subject and Auto Tone meters
+  exposure from it (spot metering), while Auto White Balance treats it as
+  neutral (eyedropper). Frees the auto from guessing where the subject is.
 - **Live RGB histogram** and capture **metadata** (camera, ISO, shutter,
   aperture, focal length, dimensions).
 - **Zoom & pan** viewer (mouse wheel to zoom, drag to pan, fit / 100%).
