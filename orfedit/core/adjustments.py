@@ -214,22 +214,45 @@ def orient(rgb: np.ndarray, rotation: int, flip_h: bool, flip_v: bool) -> np.nda
 # --------------------------------------------------------------------------
 # Auto adjustments (suggest slider values from image statistics)
 # --------------------------------------------------------------------------
-def auto_exposure_ev(
-    linear: np.ndarray, target: float = 0.11, damping: float = 0.8
-) -> float:
-    """Suggested exposure (stops) to place the median tone near ``target``.
+def _metered_key(linear: np.ndarray) -> float:
+    """Subject-weighted, highlight-protected key luminance for metering.
 
-    ``target`` is a linear-light value (0.11 ≈ a natural mid-tone once the sRGB
-    curve is applied).  The correction is damped and clamped so a single bright
-    or dark region can't drive the whole frame to a clipped extreme -- the old
-    behaviour, which mapped the median straight onto mid-grey, tended to
-    over-brighten well-lit scenes and under-brighten low-key ones.
+    A plain median/mean is dominated by whatever fills the frame: a bright
+    backlit background drags exposure down and darkens the (usually central)
+    subject, while a dark surround over-brightens it.  Instead we weight toward
+    the centre of the frame and away from near-clipped highlights (typically sky
+    or windows), then take a geometric mean, which tracks perceived exposure
+    better than an arithmetic one.
     """
     lum = luminance(linear)
-    median = float(np.median(lum))
-    if median <= _EPS:
+    h, w = lum.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    dy = (yy - (h - 1) / 2.0) / max(h / 2.0, 1.0)
+    dx = (xx - (w - 1) / 2.0) / max(w / 2.0, 1.0)
+    w_center = np.exp(-(dx * dx + dy * dy) / (2.0 * 0.5 ** 2))
+    # De-weight pixels near clipping -- most often bright background, not subject.
+    w_tone = np.clip(1.0 - _smoothstep(0.7, 1.0, lum), 0.05, 1.0)
+    weight = w_center * w_tone
+    wsum = float(weight.sum()) + _EPS
+    log_lum = np.log(np.clip(lum, 1e-4, None))
+    return float(np.exp(float(np.sum(weight * log_lum)) / wsum))
+
+
+def auto_exposure_ev(
+    linear: np.ndarray, target: float = 0.13, damping: float = 0.85
+) -> float:
+    """Suggested exposure (stops) from subject-weighted metering.
+
+    ``target`` is a linear-light key value (~0.13 ≈ a natural mid-tone once the
+    sRGB curve is applied).  Metering is centre-weighted and ignores near-clipped
+    highlights (see :func:`_metered_key`), so a bright backlit background no
+    longer forces the subject dark -- nor a dark surround over-bright.  The
+    result is damped and clamped for stability.
+    """
+    key = _metered_key(linear)
+    if key <= _EPS:
         return 0.0
-    ev = float(np.log2(target / median)) * damping
+    ev = float(np.log2(target / key)) * damping
     return float(np.clip(ev, -2.5, 2.5))
 
 
@@ -237,11 +260,12 @@ def auto_tone(linear: np.ndarray) -> dict:
     """Suggest a full set of tone adjustments (a Lightroom-style "Auto").
 
     Returns a dict of :class:`EditParams` field names to values covering
-    exposure, contrast, highlights, shadows, whites and blacks.  Exposure is
-    estimated first, then the resulting display-space tones are measured to
-    decide how much to recover highlights, open shadows and set the black/white
-    points -- so the whole tonal range is used instead of leaving the image flat
-    and hazy.
+    exposure, contrast, highlights, shadows, whites and blacks.  Exposure comes
+    from subject-weighted metering; the resulting display-space tones then decide
+    how much to recover highlights, gently open shadows and set the black/white
+    points.  The shaping is deliberately conservative -- a firm black point plus
+    contrast, but only a light shadow/white lift -- to avoid a washed-out, hazy
+    look on lifted frames.
     """
     ev = auto_exposure_ev(linear)
 
@@ -249,25 +273,25 @@ def auto_tone(linear: np.ndarray) -> dict:
     display = srgb_encode(np.clip(linear * (2.0 ** ev), 0.0, None))
     lum_d = luminance(np.clip(display, 0.0, 1.0))
     lo, hi = np.percentile(lum_d, [1.0, 99.0])
-    frac_dark = float(np.mean(lum_d < 0.06))
+    frac_dark = float(np.mean(lum_d < 0.05))
     frac_bright = float(np.mean(lum_d > 0.94))
 
     # Scale the black/white-point moves by how much tonal range actually
     # exists: a nearly flat frame must not be stretched into pure black/white.
     range_factor = float(np.clip((hi - lo) / 0.25, 0.0, 1.0))
 
-    # Blacks: deepen milky/lifted shadows toward a near-black point (~0.03).
-    blacks = -float(np.clip((lo - 0.03) / 0.06, 0.0, 1.0)) * 45.0 * range_factor
-    # Whites: add headroom when the brightest tones fall well short of white.
-    whites = float(np.clip((0.92 - hi) / 0.15, 0.0, 1.0)) * 35.0 * range_factor
+    # Blacks: set a firm black point for contrast (reliable, not hazy).
+    blacks = -float(np.clip((lo - 0.02) / 0.05, 0.0, 1.0)) * 42.0 * range_factor
+    # Whites: only a small lift, and only for genuinely dull frames.
+    whites = float(np.clip((0.90 - hi) / 0.20, 0.0, 1.0)) * 15.0 * range_factor
     # Highlights: recover when a meaningful area is near clipping.
-    highlights = -float(np.clip(frac_bright / 0.10, 0.0, 1.0)) * 55.0
-    # Shadows: open up when a meaningful area is crushed.
-    shadows = float(np.clip(frac_dark / 0.12, 0.0, 1.0)) * 45.0
+    highlights = -float(np.clip(frac_bright / 0.10, 0.0, 1.0)) * 45.0
+    # Shadows: gentle lift only -- aggressive lifting is what washes images out.
+    shadows = float(np.clip(frac_dark / 0.18, 0.0, 1.0)) * 28.0
 
     return {
         "exposure": round(float(ev), 2),
-        "contrast": 12,
+        "contrast": 16,
         "highlights": round(highlights),
         "shadows": round(shadows),
         "whites": round(whites),

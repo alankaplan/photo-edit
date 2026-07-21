@@ -163,6 +163,30 @@ def test_auto_tone_returns_full_param_set():
     }
 
 
+def test_auto_exposure_brightens_backlit_subject():
+    """Backlit group photo: near-blown sky, bright garden, shaded subjects.
+
+    A global-average metering reads the frame as bright and darkens it, burying
+    the subjects (the exact regression reported on the family photo).  Subject-
+    weighted, highlight-protected metering must brighten instead.
+    """
+    lin = np.full((80, 80, 3), 0.45, np.float32)  # bright garden background
+    lin[:25] = 0.95                                # near-blown sky band (top)
+    lin[30:78, 8:72] = 0.08                         # shaded subjects fill the foreground
+    assert adj.auto_exposure_ev(lin) > 0
+
+
+def test_auto_exposure_spares_bright_subject_on_dark_surround():
+    """Bright central subject on a dark surround must not be over-brightened.
+
+    Mirrors the dog on the couch: keying off the subject avoids the washed-out
+    over-exposure a global metering would apply to the dark room.
+    """
+    lin = np.full((80, 80, 3), 0.02, np.float32)  # dark surround
+    lin[25:70, 15:65] = 0.28                        # bright central subject
+    assert adj.auto_exposure_ev(lin) < 0.6
+
+
 def test_auto_tone_deepens_milky_blacks():
     """A washed-out, low-contrast frame should get its black point deepened."""
     rng = np.random.default_rng(0)
