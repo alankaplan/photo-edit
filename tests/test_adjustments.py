@@ -210,6 +210,20 @@ def test_spot_wb_neutralises_selected_patch():
     assert (patch.max() - patch.min()) < (0.4 * 1.4 - 0.4)
 
 
+def test_region_auto_tone_exposes_subject_brighter_than_midgrey():
+    """Pointing at a dim subject brightens it more than neutral mid-grey would.
+
+    This is the fix for "selecting the subject leaves it dark, but selecting a
+    dark area works" -- a selected region is exposed as a subject, not as grey.
+    """
+    lin = np.full((60, 60, 3), 0.5, np.float32)
+    lin[20:40, 20:40] = 0.10  # dim subject patch, centre
+    region = (0.33, 0.33, 0.66, 0.66)
+    ev_tone = adj.auto_tone(lin, region=region)["exposure"]
+    ev_midgrey = adj.auto_exposure_ev(lin, region=region)  # neutral 0.13 target
+    assert ev_tone > ev_midgrey
+
+
 def test_region_resolves_and_clamps():
     sl = adj._resolve_region((100, 200), (0.25, 0.5, 0.75, 1.0))
     rows, cols = sl

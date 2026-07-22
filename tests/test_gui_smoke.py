@@ -80,23 +80,24 @@ def test_region_selection_drives_spot_metering(app):
     win._on_open_demo()
     _wait_until(lambda: win._last_shown_id >= 0)
 
-    # Simulate the viewer emitting a region (as a rubber-band release would):
-    # the bright upper-left sky band of the demo image.
-    win._viewer.region_selected.emit(0.0, 0.0, 0.5, 0.25)
-    assert win._meter_region == (0.0, 0.0, 0.5, 0.25)
-
+    # Meter a bright region (top sky band of the demo image).
+    win._viewer.region_selected.emit(0.0, 0.0, 0.5, 0.2)
+    assert win._meter_region == (0.0, 0.0, 0.5, 0.2)
     win._on_auto_tone()
-    ev_region = win._controls.params().exposure
+    ev_bright = win._controls.params().exposure
 
-    # Clearing the region and re-running should meter the whole frame instead.
+    # Meter a dark region (shadow corner) instead.
+    win._controls.reset_all()
+    win._viewer.region_selected.emit(0.0, 0.72, 0.3, 1.0)
+    win._on_auto_tone()
+    ev_dark = win._controls.params().exposure
+
+    # Spot metering: a dark selection is brightened more than a bright one.
+    assert ev_dark > ev_bright
+
+    # Turning the mode off clears the region back to whole-frame metering.
     win._on_toggle_region_select(False)
     assert win._meter_region is None
-    win._controls.reset_all()
-    win._on_auto_tone()
-    ev_full = win._controls.params().exposure
-
-    # Metering a bright region should darken relative to whole-frame metering.
-    assert ev_region < ev_full
     win.close()
 
 

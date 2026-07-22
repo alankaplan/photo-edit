@@ -216,6 +216,13 @@ def orient(rgb: np.ndarray, rotation: int, flip_h: bool, flip_v: bool) -> np.nda
 # --------------------------------------------------------------------------
 Region = "tuple[float, float, float, float]"  # normalized (x0, y0, x1, y1) in [0, 1]
 
+# Linear-light metering targets.  Whole-frame metering aims at a conservative
+# mid-tone; a user-selected region is treated as "the subject", so it is aimed
+# a stop or so brighter (roughly zone VI) -- pointing at a light subject should
+# make it look well-exposed, not drag it down to 18% grey.
+WHOLE_FRAME_TARGET = 0.13
+SUBJECT_TARGET = 0.22
+
 
 def _resolve_region(shape, region):
     """Convert a normalized ``(x0, y0, x1, y1)`` region to pixel slices.
@@ -302,8 +309,15 @@ def auto_tone(linear: np.ndarray, region: "Region | None" = None) -> dict:
     points.  The shaping is deliberately conservative -- a firm black point plus
     contrast, but only a light shadow/white lift -- to avoid a washed-out, hazy
     look on lifted frames.
+
+    When a ``region`` is selected the user is pointing at the subject and means
+    "expose *this* well", so we aim it at a brighter, subject-appropriate tone
+    (``SUBJECT_TARGET``) rather than neutral 18% grey.  Plain mid-grey spot
+    metering would darken a light subject (e.g. pale fur) toward grey and leave
+    the frame dark, which is why metering a dark area used to work better.
     """
-    ev = auto_exposure_ev(linear, region=region)
+    target = SUBJECT_TARGET if region is not None else WHOLE_FRAME_TARGET
+    ev = auto_exposure_ev(linear, target=target, region=region)
 
     # Evaluate the tones we'd actually see after this exposure, in display space.
     display = srgb_encode(np.clip(linear * (2.0 ** ev), 0.0, None))
